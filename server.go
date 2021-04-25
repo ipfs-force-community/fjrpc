@@ -9,8 +9,10 @@ import (
 	"net/http"
 	"reflect"
 	"runtime/debug"
+	"strings"
 	"time"
 
+	gj "github.com/filecoin-project/go-jsonrpc"
 	logging "github.com/ipfs/go-log/v2"
 	"go.opencensus.io/trace"
 	"go.opencensus.io/trace/propagation"
@@ -43,24 +45,50 @@ func (rh *rpcHandler) call(args []reflect.Value) (out []reflect.Value, err error
 	return
 }
 
-type serverConfig struct {
-	maxRequestSize int64
+type MixedServer struct {
+	http *RPCServer
+	ws   *gj.RPCServer
 }
 
-// NewServer creates a new RPCServer instance
-func NewServer(opts ...ServerOption) *RPCServer {
+func (ms *MixedServer) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
+	if h := req.Header.Get("Connection"); h != "" && strings.Contains(strings.ToLower(h), "upgrade") {
+		ms.ws.ServeHTTP(rw, req)
+		return
+	}
+
+	ms.http.ServeHTTP(rw, req)
+}
+
+func (ms *MixedServer) Register(namespace string, handler interface{}) {
+	ms.http.Register(namespace, handler)
+	ms.ws.Register(namespace, handler)
+}
+
+func NewServer(opts ...ServerOption) *MixedServer {
+	return &MixedServer{
+		http: NewRPCServer(),
+		ws:   gj.NewServer(opts...),
+	}
+}
+
+// NewRPCServer creates a new RPCServer instance
+func NewRPCServer() *RPCServer {
 	return &RPCServer{
 		handlers: map[string]rpcHandler{},
-		cfg: serverConfig{
+		cfg: rpcServerConfig{
 			maxRequestSize: 16 << 20,
 		},
 	}
 }
 
+type rpcServerConfig struct {
+	maxRequestSize int64
+}
+
 // RPCServer wraps local methods and serve as a http server
 type RPCServer struct {
 	handlers map[string]rpcHandler
-	cfg      serverConfig
+	cfg      rpcServerConfig
 }
 
 func (rs *RPCServer) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
